@@ -1,0 +1,308 @@
+WITH shoplist AS (
+    SELECT DISTINCT
+        TRY_CAST(shopid AS BIGINT) AS shopid
+        , MAX(incu_category) AS incu_category
+        , MAX(relationship_manager) AS relationship_manager
+        , MAX(status) AS status
+        , MAX(DATE_PARSE(start_date, '%m/%d/%Y')) AS start_date
+        , MAX(IF(duration LIKE '%weeks%', duration, NULL)) AS duration
+    FROM
+        shopee_ph.shopee_ph_bi_team__incu_pipeline_shoplist
+    WHERE
+        ingestion_timestamp = (SELECT MAX(ingestion_timestamp) col1 FROM shopee_ph.shopee_ph_bi_team__incu_pipeline_shoplist)
+    GROUP BY
+        1
+)
+, campaign AS (
+    SELECT
+        item_id AS itemid
+        , grass_date
+        , FROM_UNIXTIME(MAX(start_time)) AS ST
+        , FROM_UNIXTIME(MAX(end_time)) AS ET
+    FROM
+        shopee_ph.shopee_bi_ph_campaign_item
+    GROUP BY
+        1,2
+)
+, penalty AS (
+    SELECT
+        shop_id AS shopid
+        , MAX_BY(point, execute_dt) AS current_penalty_points
+    FROM
+        shopee_ph.shopee_bigdata_penalty_db__penalty_status_tab
+    GROUP BY
+        1
+)
+, paid_ads AS (    
+    SELECT
+        shopid
+        , i.main_category
+        , SUM(
+            CASE WHEN DATE_TRUNC('month', grass_date) = DATE_ADD('month', -2, DATE_TRUNC('month', DATE_ADD('day', -1, CURRENT_DATE)))
+            THEN ads_orders
+            END) AS M_2__ads_orders
+        , SUM(
+            CASE WHEN DATE_TRUNC('month', grass_date) = DATE_ADD('month', -1, DATE_TRUNC('month', DATE_ADD('day', -1, CURRENT_DATE)))
+            THEN ads_orders
+            END) AS M_1__ads_orders
+        , SUM(
+            CASE WHEN DATE_TRUNC('month', grass_date) = DATE_TRUNC('month', DATE_ADD('day', -1, CURRENT_DATE))
+            THEN ads_orders
+            END) AS MTD__ads_orders
+        
+        , SUM(
+            CASE WHEN DATE_TRUNC('week', grass_date) = DATE_ADD('week', -2, DATE_TRUNC('week', DATE_ADD('day', -1, CURRENT_DATE)))
+            THEN ads_orders
+            END) AS W_2__ads_orders
+        , SUM(
+            CASE WHEN DATE_TRUNC('week', grass_date) = DATE_ADD('week', -1, DATE_TRUNC('week', DATE_ADD('day', -1, CURRENT_DATE)))
+            THEN ads_orders
+            END) AS W_1__ads_orders
+        , SUM(
+            CASE WHEN DATE_TRUNC('week', grass_date) = DATE_TRUNC('week', DATE_ADD('day', -1, CURRENT_DATE))
+            THEN ads_orders
+            END) AS WTD__ads_orders
+    FROM 
+        shopee_ph.paid_ads_mart__agg_ads_tab ads
+    LEFT JOIN
+        (SELECT DISTINCT itemid, main_category FROM shopee_ph.item_profile) i
+        ON ads.itemid = i.itemid
+    GROUP BY
+        1,2
+)
+
+, platform AS (
+    SELECT
+        SUM(
+            CASE WHEN DATE_TRUNC('week', grass_date) = DATE_ADD('week', -2, DATE_TRUNC('week', DATE_ADD('day', -1, CURRENT_DATE)))
+            THEN order_fraction
+            END) AS W_2__plat_orders
+        , SUM(
+            CASE WHEN DATE_TRUNC('week', grass_date) = DATE_ADD('week', -1, DATE_TRUNC('week', DATE_ADD('day', -1, CURRENT_DATE)))
+            THEN order_fraction
+            END) AS W_1__plat_orders
+        , SUM(
+            CASE WHEN DATE_TRUNC('week', grass_date) = DATE_TRUNC('week', DATE_ADD('day', -1, CURRENT_DATE))
+            THEN order_fraction
+            END) AS WTD__plat_orders
+        , SUM(
+            CASE WHEN DATE_TRUNC('week', grass_date) = DATE_ADD('week', -2, DATE_TRUNC('week', DATE_ADD('day', -1, CURRENT_DATE)))
+            THEN gmv_usd
+            END) AS W_2__plat_gmv
+        , SUM(
+            CASE WHEN DATE_TRUNC('week', grass_date) = DATE_ADD('week', -1, DATE_TRUNC('week', DATE_ADD('day', -1, CURRENT_DATE)))
+            THEN gmv_usd
+            END) AS W_1__plat_gmv
+        , SUM(
+            CASE WHEN DATE_TRUNC('week', grass_date) = DATE_TRUNC('week', DATE_ADD('day', -1, CURRENT_DATE))
+            THEN gmv_usd
+            END) AS WTD__plat_gmv
+    FROM
+        shopee_ph.order_mart__order_item_profile
+    WHERE
+        bi_excluded IS NULL
+)
+
+, active_items AS (
+    SELECT
+        shopid
+        , main_cat
+        , COUNT(DISTINCT itemid) AS num_active_items
+    FROM
+        shopee_ph.item_profile
+    WHERE
+        IF(modelid=0, item_status=1, item_status=1 AND model_status=1)
+    GROUP BY
+        1,2
+)
+
+, ccb_vouchers AS (
+    SELECT DISTINCT 
+        TRY_CAST(promo_id AS BIGINT) AS promotion_id
+    FROM shopee_ph.shopee_ph_bi_team__whitelisted
+    WHERE
+        ingestion_timestamp = (
+            SELECT MAX(ingestion_timestamp) AS ingestion_timestamp FROM shopee_ph.shopee_ph_bi_team__whitelisted
+        )
+
+    UNION
+
+    SELECT DISTINCT 
+        TRY_CAST(promo_id AS BIGINT) AS promotion_id
+    FROM shopee_ph.shopee_ph_bi_team__preloaded
+    WHERE
+        ingestion_timestamp = (
+            SELECT MAX(ingestion_timestamp) AS ingestion_timestamp FROM shopee_ph.shopee_ph_bi_team__preloaded
+        )
+
+    UNION
+
+    SELECT DISTINCT
+        TRY_CAST(promotionid AS BIGINT) AS promotion_id      
+    FROM shopee_ph.shopee_voucher_db__promotion_tab
+    WHERE name = 'CCBCampaign'  
+        AND DATE(FORMAT_DATETIME(FROM_UNIXTIME(start_time), 'yyyy-MM-dd')) >= DATE('2019-10-08')
+        AND shopid <> 0
+)
+
+, performance AS (
+    SELECT
+        shoplist.shopid
+        , shoplist.incu_category
+        , shoplist.relationship_manager
+        , shoplist.status
+        , shoplist.duration
+
+        , penalty.current_penalty_points
+        , DATE_FORMAT(shoplist.start_date, '%m/%d/%Y') AS start_date
+        , category_mapping.main_display_name AS bi_item_category
+        , num_active_items
+
+        , SUM(
+            CASE WHEN DATE_TRUNC('month', o.grass_date) = DATE_ADD('month', -2, DATE_TRUNC('month', DATE_ADD('day', -1, CURRENT_DATE)))
+            THEN order_fraction
+            END) AS M_2__orders
+        , SUM(
+            CASE WHEN DATE_TRUNC('month', o.grass_date) = DATE_ADD('month', -1, DATE_TRUNC('month', DATE_ADD('day', -1, CURRENT_DATE)))
+            THEN order_fraction
+            END) AS M_1__orders
+        , SUM(
+            CASE WHEN DATE_TRUNC('month', o.grass_date) = DATE_TRUNC('month', DATE_ADD('day', -1, CURRENT_DATE))
+            THEN order_fraction
+            END) AS MTD__orders
+        
+        , SUM(
+            CASE WHEN DATE_TRUNC('week', o.grass_date) = DATE_ADD('week', -2, DATE_TRUNC('week', DATE_ADD('day', -1, CURRENT_DATE)))
+            THEN order_fraction
+            END) AS W_2__orders
+        , SUM(
+            CASE WHEN DATE_TRUNC('week', o.grass_date) = DATE_ADD('week', -1, DATE_TRUNC('week', DATE_ADD('day', -1, CURRENT_DATE)))
+            THEN order_fraction
+            END) AS W_1__orders
+        , SUM(
+            CASE WHEN DATE_TRUNC('week', o.grass_date) = DATE_TRUNC('week', DATE_ADD('day', -1, CURRENT_DATE))
+            THEN order_fraction
+            END) AS WTD__orders
+        
+        , SUM(
+            CASE WHEN DATE_TRUNC('month', o.grass_date) = DATE_ADD('month', -2, DATE_TRUNC('month', DATE_ADD('day', -1, CURRENT_DATE)))
+            THEN gmv_usd
+            END) AS M_2__gmv
+        , SUM(
+            CASE WHEN DATE_TRUNC('month', o.grass_date) = DATE_ADD('month', -1, DATE_TRUNC('month', DATE_ADD('day', -1, CURRENT_DATE)))
+            THEN gmv_usd
+            END) AS M_1__gmv
+        , SUM(
+            CASE WHEN DATE_TRUNC('month', o.grass_date) = DATE_TRUNC('month', DATE_ADD('day', -1, CURRENT_DATE))
+            THEN gmv_usd
+            END) AS MTD__gmv
+        
+        , SUM(
+            CASE WHEN DATE_TRUNC('week', o.grass_date) = DATE_ADD('week', -2, DATE_TRUNC('week', DATE_ADD('day', -1, CURRENT_DATE)))
+            THEN gmv_usd
+            END) AS W_2__gmv
+        , SUM(
+            CASE WHEN DATE_TRUNC('week', o.grass_date) = DATE_ADD('week', -1, DATE_TRUNC('week', DATE_ADD('day', -1, CURRENT_DATE)))
+            THEN gmv_usd
+            END) AS W_1__gmv
+        , SUM(
+            CASE WHEN DATE_TRUNC('week', o.grass_date) = DATE_TRUNC('week', DATE_ADD('day', -1, CURRENT_DATE))
+            THEN gmv_usd
+            END) AS WTD__gmv
+
+
+        , SUM(CASE
+            WHEN DATE_DIFF('day', o.grass_date, DATE_ADD('day', -1, CURRENT_DATE)) BETWEEN 1 AND 30
+                AND campaign.itemid IS NOT NULL
+            THEN gmv_usd
+            END) AS campaign_gmv_L30D
+        , SUM(CASE
+            WHEN DATE_DIFF('day', o.grass_date, DATE_ADD('day', -1, CURRENT_DATE)) BETWEEN 1 AND 30
+                AND campaign.itemid IS NULL
+                AND promo_source = 'flash_sale'
+            THEN gmv_usd
+            END) AS flash_gmv_L30D
+        , SUM(CASE
+            WHEN DATE_DIFF('day', o.grass_date, DATE_ADD('day', -1, CURRENT_DATE)) BETWEEN 1 AND 30
+                AND campaign.itemid IS NULL
+                AND COALESCE(promo_source, '') <> 'flash_sale'
+                AND COALESCE(free_shipping_voucher, CAST(ccb_vouchers.promotion_id AS VARCHAR)) IS NOT NULL
+            THEN gmv_usd
+            END) AS voucher_gmv_L30D
+        , SUM(CASE
+            WHEN DATE_DIFF('day', o.grass_date, DATE_ADD('day', -1, CURRENT_DATE)) BETWEEN 1 AND 30
+                AND campaign.itemid IS NULL
+                AND COALESCE(promo_source, '') <> 'flash_sale'
+                AND COALESCE(free_shipping_voucher, CAST(ccb_vouchers.promotion_id AS VARCHAR)) IS NULL
+            THEN gmv_usd
+            END) AS organic_gmv_L30D
+        
+        , SUM(CASE
+            WHEN DATE_DIFF('day', o.grass_date, DATE_ADD('day', -1, CURRENT_DATE)) BETWEEN 1 AND 30
+            THEN gmv_usd
+            END) AS total_gmv_L30D
+        
+        , M_2__ads_orders
+        , M_1__ads_orders
+        , MTD__ads_orders
+
+        , W_2__ads_orders
+        , W_1__ads_orders
+        , WTD__ads_orders
+
+        , W_2__plat_orders
+        , W_1__plat_orders
+        , WTD__plat_orders
+        
+        , W_2__plat_gmv
+        , W_1__plat_gmv
+        , WTD__plat_gmv
+    FROM
+        shoplist
+    LEFT JOIN
+        shopee_ph.item_profile i
+        ON shoplist.shopid = i.shopid
+    LEFT JOIN
+        shopee_ph_anlys.category_mapping
+        ON i.main_cat = category_mapping.main_cat
+    LEFT JOIN
+        active_items
+        ON shoplist.shopid = active_items.shopid
+        AND i.main_cat = active_items.main_cat
+    LEFT JOIN
+        penalty
+        ON shoplist.shopid = penalty.shopid
+    LEFT JOIN
+        shopee_ph.order_mart__order_item_profile o
+        ON o.itemid = i.itemid
+        AND o.modelid = i.modelid
+    LEFT JOIN
+        ccb_vouchers
+        ON o.promotion_id = ccb_vouchers.promotion_id
+    LEFT JOIN
+        campaign
+        ON o.itemid = campaign.itemid
+        AND o.grass_date = campaign.grass_date
+        AND o.create_time BETWEEN campaign.ST AND campaign.ET
+    LEFT JOIN
+        paid_ads
+        ON i.shopid = paid_ads.shopid
+        AND i.main_category = paid_ads.main_category
+    CROSS JOIN
+        platform
+    WHERE
+        bi_excluded IS NULL
+        AND o.grass_date >= DATE_ADD('month', -2, DATE_TRUNC('month', DATE_ADD('day', -1, CURRENT_DATE)))
+    GROUP BY
+        1,2,3,4,5,6,7,8,9
+        
+        , M_2__ads_orders, M_1__ads_orders, MTD__ads_orders
+        , W_2__ads_orders, W_1__ads_orders, WTD__ads_orders
+        
+        , W_2__plat_orders, W_1__plat_orders, WTD__plat_orders
+        , W_2__plat_gmv, W_1__plat_gmv, WTD__plat_gmv
+)
+
+SELECT *
+FROM performance
+ORDER BY status, relationship_manager, shopid, MTD__orders DESC
