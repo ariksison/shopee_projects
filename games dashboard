@@ -1,0 +1,229 @@
+WITH all_dates AS (
+    SELECT DISTINCT grass_date FROM order_mart__order_profile
+)
+
+, claimed_tab AS (
+SELECT
+    DATE(FROM_UNIXTIME(ctime)) AS grass_date
+    , promotionid
+    ,SUM(total_count) AS claimed_count
+FROM
+    shopee_voucher_wallet_v2_db__voucher_wallet_tab
+GROUP BY
+    1,2
+)
+
+, fsv_order_mart AS (
+    SELECT
+        order_mart__order_item_profile.grass_date
+        , fsv_promotionid AS promotion_id
+        , COUNT(DISTINCT CONCAT(CAST(event_timestamp AS VARCHAR), CAST(userid AS VARCHAR))) AS gross_checkouts
+        , SUM(order_fraction) AS orders
+        , SUM(gmv_usd) AS gmv
+        , SUM((((shopee_estimate_shipping_rebate_usd*COALESCE(discount_rate,0.779463149)) - (estimate_cashback_usd*COALESCE(order_rate,0.741706949)))
+            + ((return_shipping_fee_usd-estimate_cashback_usd)*COALESCE(return_rate,0.013926217))) / IF(is_cross_border=1,1,1.11)) AS logistics_cost
+        , SUM((shopee_voucher_rebate_usd)*COALESCE(discount_rate,0.779463149)) AS shopee_voucher_cost
+        , SUM((seller_voucher_rebate_usd)*COALESCE(discount_rate,0.779463149)) AS seller_voucher_cost
+        , SUM(shopee_item_rebate_usd*COALESCE(discount_rate,0.779463149)) AS item_cost
+        , SUM(coin_earn_by_voucher/100/exchange_rate*COALESCE(coin_rate, 0.70585084)*COALESCE(discount_rate,0.779463149)) AS coins_cost
+        , COUNT(DISTINCT userid) AS buyer_count
+        , COUNT(DISTINCT CASE WHEN is_first_purchase = 1 THEN userid END) AS new_buyer_count
+    FROM
+        order_mart__order_item_profile
+    LEFT JOIN
+        shopee_ph_anlys.rates
+        ON order_mart__order_item_profile.grass_date = rates.grass_date
+    WHERE
+        order_mart__order_item_profile.bi_excluded IS NULL
+    GROUP BY
+        1,2
+)
+, fsv_table AS (
+    SELECT
+        promotion_tab.promotionid
+        , promotion_tab.prefix AS voucher_code
+        , CASE
+            WHEN rule.type = 0 THEN 'product_discount'
+            WHEN rule.type = 1 THEN 'coin_cashback'
+            WHEN rule.type = 2 THEN 'free_shipping_voucher'
+            END AS reward_type
+        , CASE
+            WHEN promotion_tab.use_type = 0 THEN 'private'
+            WHEN promotion_tab.use_type = 1 THEN 'public'
+            END AS use_type
+        , FROM_UNIXTIME(promotion_tab.start_time) AS start_time
+        , FROM_UNIXTIME(promotion_tab.end_time) AS end_time
+        , CASE
+            WHEN promotion_tab.use_type = 0 AND promotion_tab.voucher_market_type = 1 THEN promotion_tab.total_count
+            WHEN promotion_tab.use_type = 1 AND promotion_tab.voucher_market_type = 1 THEN promotion_tab.usage_limit
+            ELSE 2000000000
+            END AS quantity
+        , promotion_tab.current_usage AS voucher_current_usage
+        , promotion_tab.min_price / 100000 AS min_spend
+        , promotion_tab.value / 100000 AS discount_value
+        , CAST(promotion_tab.rule.coin_cashback_voucher.coin_percentage_real AS DOUBLE) / 100 AS coin_percentage
+        , promotion_tab.rule.coin_cashback_voucher.max_coin
+        , all_dates.grass_date
+        , fsv_order_mart.gross_checkouts
+        , fsv_order_mart.orders
+        , fsv_order_mart.gmv
+        , fsv_order_mart.logistics_cost
+        , fsv_order_mart.shopee_voucher_cost
+        , fsv_order_mart.seller_voucher_cost
+        , fsv_order_mart.item_cost
+        , fsv_order_mart.coins_cost
+        , fsv_order_mart.buyer_count
+        , fsv_order_mart.new_buyer_count
+        , claimed_tab.claimed_count
+        , CASE
+            WHEN shopid = 0 THEN 'shopee_voucher'
+            ELSE 'seller_voucher' END AS voucher_type
+    FROM
+        shopee_voucher_db__promotion_tab AS promotion_tab
+    CROSS JOIN
+        all_dates
+    INNER JOIN
+        fsv_order_mart
+        ON promotion_tab.promotionid = fsv_order_mart.promotion_id
+        AND all_dates.grass_date = fsv_order_mart.grass_date
+    LEFT JOIN
+        claimed_tab
+        ON promotion_tab.promotionid = claimed_tab.promotionid
+        AND all_dates.grass_date = claimed_tab.grass_date
+    WHERE
+        rule.type = 2
+)
+, discount_and_coin_order_mart AS (
+    SELECT
+        order_mart__order_item_profile.grass_date
+        , pv_promotionid AS promotion_id
+        , COUNT(DISTINCT CONCAT(CAST(event_timestamp AS VARCHAR), CAST(userid AS VARCHAR))) AS gross_checkouts
+        , SUM(order_fraction) AS orders
+        , SUM(gmv_usd) AS gmv
+        , SUM((((shopee_estimate_shipping_rebate_usd*COALESCE(discount_rate,0.779463149)) - (estimate_cashback_usd*COALESCE(order_rate,0.741706949)))
+            + ((return_shipping_fee_usd-estimate_cashback_usd)*COALESCE(return_rate,0.013926217))) / IF(is_cross_border=1,1,1.11)) AS logistics_cost
+        , SUM((shopee_voucher_rebate_usd)*COALESCE(discount_rate,0.779463149)) AS shopee_voucher_cost
+        , SUM((seller_voucher_rebate_usd)*COALESCE(discount_rate,0.779463149)) AS seller_voucher_cost
+        , SUM(shopee_item_rebate_usd*COALESCE(discount_rate,0.779463149)) AS item_cost
+        , SUM(coin_earn_by_voucher/100/exchange_rate*COALESCE(coin_rate, 0.70585084)*COALESCE(discount_rate,0.779463149)) AS coins_cost
+        , COUNT(DISTINCT userid) AS buyer_count
+        , COUNT(DISTINCT CASE WHEN is_first_purchase = 1 THEN userid END) AS new_buyer_count
+    FROM
+        order_mart__order_item_profile
+    LEFT JOIN
+        shopee_ph_anlys.rates
+        ON order_mart__order_item_profile.grass_date = rates.grass_date
+    WHERE
+        order_mart__order_item_profile.bi_excluded IS NULL
+    GROUP BY
+        1,2
+)
+, discount_and_coin_table AS (
+    SELECT
+        promotion_tab.promotionid
+        , promotion_tab.prefix AS voucher_code
+        , CASE
+            WHEN rule.type = 0 THEN 'product_discount'
+            WHEN rule.type = 1 THEN 'coin_cashback'
+            WHEN rule.type = 2 THEN 'free_shipping_voucher'
+            END AS reward_type
+        , CASE
+            WHEN promotion_tab.use_type = 0 THEN 'private'
+            WHEN promotion_tab.use_type = 1 THEN 'public'
+            END AS use_type
+        , FROM_UNIXTIME(promotion_tab.start_time) AS start_time
+        , FROM_UNIXTIME(promotion_tab.end_time) AS end_time
+        , CASE
+            WHEN promotion_tab.use_type = 0 AND promotion_tab.voucher_market_type = 1 THEN promotion_tab.total_count
+            WHEN promotion_tab.use_type = 1 AND promotion_tab.voucher_market_type = 1 THEN promotion_tab.usage_limit
+            ELSE 2000000000
+            END AS quantity
+        , promotion_tab.current_usage AS voucher_current_usage
+        , promotion_tab.min_price / 100000 AS min_spend
+        , promotion_tab.value / 100000 AS discount_value
+        , CAST(promotion_tab.rule.coin_cashback_voucher.coin_percentage_real AS DOUBLE) / 100 AS coin_percentage
+        , promotion_tab.rule.coin_cashback_voucher.max_coin
+        , all_dates.grass_date
+        , discount_and_coin_order_mart.gross_checkouts
+        , discount_and_coin_order_mart.orders
+        , discount_and_coin_order_mart.gmv
+        , discount_and_coin_order_mart.logistics_cost
+        , discount_and_coin_order_mart.shopee_voucher_cost
+        , discount_and_coin_order_mart.seller_voucher_cost
+        , discount_and_coin_order_mart.item_cost
+        , discount_and_coin_order_mart.coins_cost
+        , discount_and_coin_order_mart.buyer_count
+        , discount_and_coin_order_mart.new_buyer_count
+        , claimed_tab.claimed_count
+        , CASE
+            WHEN shopid = 0 THEN 'shopee_voucher'
+            ELSE 'seller_voucher' END AS voucher_type
+    FROM
+        shopee_voucher_db__promotion_tab AS promotion_tab
+    CROSS JOIN
+        all_dates
+    INNER JOIN
+        discount_and_coin_order_mart
+        ON promotion_tab.promotionid = discount_and_coin_order_mart.promotion_id
+        AND all_dates.grass_date = discount_and_coin_order_mart.grass_date
+    LEFT JOIN
+        claimed_tab
+        ON promotion_tab.promotionid = claimed_tab.promotionid
+        AND all_dates.grass_date = claimed_tab.grass_date
+    WHERE
+        rule.type <= 1
+)
+, all_vouchers_table AS (
+    SELECT * FROM discount_and_coin_table
+    UNION ALL
+    (
+        SELECT fsv_table.*
+        FROM fsv_table
+        LEFT JOIN discount_and_coin_table
+            ON fsv_table.promotionid = discount_and_coin_table.promotionid
+            AND fsv_table.voucher_code = discount_and_coin_table.voucher_code
+        WHERE discount_and_coin_table.promotionid IS NULL
+    )
+)
+SELECT
+    promotionid
+    , voucher_code
+    , reward_type
+    , use_type
+    , start_time
+    , end_time
+    , min_spend
+    , discount_value
+    , coin_percentage
+    , max_coin
+    , quantity
+    , voucher_current_usage
+    , grass_date
+    , claimed_count
+    , gross_checkouts
+    , CASE
+        WHEN quantity = 0 THEN 0
+        ELSE voucher_current_usage / CAST(quantity AS DOUBLE)
+        END AS usage_rate_quantity
+    , CASE
+        WHEN claimed_count = 0 THEN 0
+        ELSE voucher_current_usage / CAST(claimed_count AS DOUBLE)
+        END AS usage_rate_claimed
+    , orders
+    , gmv
+    , gmv / orders AS abs
+    , CASE WHEN reward_type = 'product_discount' THEN shopee_voucher_cost ELSE 0 END AS shopee_voucher_cost
+    , CASE WHEN reward_type = 'coin_cashback' THEN coins_cost ELSE 0 END AS coins_cost
+    , CASE WHEN reward_type = 'free_shipping_voucher' THEN logistics_cost ELSE 0 END AS logistics_cost
+    , CASE
+        WHEN reward_type = 'product_discount' THEN shopee_voucher_cost / gmv
+        WHEN reward_type = 'coin_cashback' THEN coins_cost / gmv
+        WHEN reward_type = 'free_shipping_voucher' THEN logistics_cost / gmv
+        END AS cir
+    , buyer_count
+    , new_buyer_count
+    FROM
+    all_vouchers_table
+--WHERE CAST(promotionid AS VARCHAR) IN ('Upload a CSV File') OR voucher_code IN ('Upload a CSV File')
+ORDER BY
+    promotionid, grass_date
