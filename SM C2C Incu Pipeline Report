@@ -24,6 +24,7 @@ WITH shoplist AS (
     GROUP BY
         1,2
 )
+
 , penalty AS (
     SELECT
         shop_id AS shopid
